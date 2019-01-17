@@ -12,10 +12,12 @@ type MessageCenter struct {
 	topics map[string]*topic.Topic
 }
 
-var mc = &MessageCenter{topics: make(map[string]*topic.Topic)}
+func NewTopics() *MessageCenter {
+	return &MessageCenter{topics: make(map[string]*topic.Topic)}
+}
 
 // NewTopic
-func NewTopic(name string) error {
+func (mc *MessageCenter) NewTopic(name string) error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 	if _, ok := mc.topics[name]; ok {
@@ -26,7 +28,7 @@ func NewTopic(name string) error {
 }
 
 // Subscribe
-func Subscribe(name string, channel interface{}) (subscription.Subscription, error) {
+func (mc *MessageCenter) Subscribe(name string, channel interface{}) (subscription.Subscription, error) {
 	t, ok := mc.topics[name]
 	if !ok {
 		return nil, topic.ErrHaveNoTopic
@@ -35,7 +37,7 @@ func Subscribe(name string, channel interface{}) (subscription.Subscription, err
 }
 
 // Publish
-func Publish(name string, value interface{}) error {
+func (mc *MessageCenter) Publish(name string, value interface{}) error {
 	t, ok := mc.topics[name]
 	if !ok {
 		return topic.ErrHaveNoTopic
