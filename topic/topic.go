@@ -1,6 +1,7 @@
 package topic
 
 import (
+	"github.com/xiaoziqingren/spub/subscription"
 	"reflect"
 	"sync"
 )
@@ -9,14 +10,21 @@ import (
 type Topic struct {
 	name string
 
-	mu   sync.RWMutex
-	once sync.Once
+	once      sync.Once        // ensures that init only runs once
+	sendLock  chan struct{}    // sendLock has a one-element buffer and is empty when held.It protects sendCases.
+	removeSub chan interface{} // interrupts Send
+	sendCases caseList         // the active set of select cases used by Send
 
-	sendBlocker chan struct{}
-	subscriber  caseList
-
-	eType reflect.Type
+	// The inbox holds newly subscribed channels until they are added to sendCases.
+	mu     sync.Mutex
+	inbox  caseList
+	etype  reflect.Type
+	closed bool
 }
+
+// This is the index of the first actual subscription channel in sendCases.
+// sendCases[0] is a SelectRecv case for the removeSub channel.
+const firstSubSendCase = 1
 
 func NewTopic(name string) error {
 	if Manager.exist(name) {
@@ -24,90 +32,108 @@ func NewTopic(name string) error {
 	}
 
 	t := &Topic{name: name}
-	t.once.Do(t.init)
 	Manager.add(t)
 	return nil
 }
 
 func (t *Topic) init() {
-	t.sendBlocker = make(chan struct{}, 1)
-	t.sendBlocker <- struct{}{}
+	t.removeSub = make(chan interface{})
+	t.sendLock = make(chan struct{}, 1)
+	t.sendLock <- struct{}{}
+	t.sendCases = caseList{{Chan: reflect.ValueOf(t.removeSub), Dir: reflect.SelectRecv}}
 }
 
-func (t *Topic) Subscribe(receiver interface{}) {
-	// check chan type
-	chanVal := reflect.ValueOf(receiver)
-	chanTyp := chanVal.Type()
-	if chanTyp.Kind() != reflect.Chan || chanTyp.ChanDir()&reflect.SendDir == 0 {
+func (t *Topic) Subscribe(channel interface{}) subscription.Subscription {
+	t.once.Do(t.init)
+
+	chanval := reflect.ValueOf(channel)
+	chantyp := chanval.Type()
+	if chantyp.Kind() != reflect.Chan || chantyp.ChanDir()&reflect.SendDir == 0 {
 		panic(errBadChannel)
 	}
+	sub := &subPerformer{topic: t, channel: chanval, err: make(chan error, 1)}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// check new chan type if equal to topic type
-	if !t.checkType(chanTyp.Elem()) {
-		panic(ChanTypeError{got: chanTyp.Elem(), want: reflect.ChanOf(reflect.SendDir, t.eType)})
+	if !t.checkType(chantyp.Elem()) {
+		panic(ChanTypeError{got: chantyp, want: reflect.ChanOf(reflect.SendDir, t.etype)})
 	}
-
-	t.subscriber = append(t.subscriber, reflect.SelectCase{Dir: reflect.SelectSend, Chan: chanVal})
+	// Add the select case to the inbox.
+	// The next Send will add it to f.sendCases.
+	cas := reflect.SelectCase{Dir: reflect.SelectSend, Chan: chanval}
+	t.inbox = append(t.inbox, cas)
+	return sub
 }
 
-func (t *Topic) UnSubscribe(receiver reflect.Value) {
-	ch := receiver.Interface()
+func (t *Topic) Unsubscribe(sub *subPerformer) {
+	ch := sub.channel.Interface()
 	t.mu.Lock()
-	index := t.subscriber.find(ch)
+	index := t.inbox.find(ch)
 	if index != -1 {
-		t.subscriber = t.subscriber.delete(index)
+		t.inbox = t.inbox.delete(index)
 		t.mu.Unlock()
 		return
 	}
 	t.mu.Unlock()
+
+	select {
+	case t.removeSub <- ch:
+		// Send will remove the channel from f.sendCases.
+	case <-t.sendLock:
+		// No Send is in progress, delete the channel now that we have the send lock.
+		t.sendCases = t.sendCases.delete(t.sendCases.find(ch))
+		t.sendLock <- struct{}{}
+	}
 }
 
 func (t *Topic) Publish(value interface{}) (sent int) {
 	rvalue := reflect.ValueOf(value)
 
-	<-t.sendBlocker
+	t.once.Do(t.init)
+	<-t.sendLock
 
 	// Add new cases from the inbox after taking the send lock.
 	t.mu.Lock()
+	t.sendCases = append(t.sendCases, t.inbox...)
+	t.inbox = nil
+
 	if !t.checkType(rvalue.Type()) {
-		t.sendBlocker <- struct{}{}
-		panic(ChanTypeError{got: rvalue.Type(), want: t.eType})
+		t.sendLock <- struct{}{}
+		panic(ChanTypeError{got: rvalue.Type(), want: t.etype})
 	}
 	t.mu.Unlock()
 
 	// Set the sent value on all channels.
-	for i := 0; i < len(t.subscriber); i++ {
-		t.subscriber[i].Send = rvalue
+	for i := firstSubSendCase; i < len(t.sendCases); i++ {
+		t.sendCases[i].Send = rvalue
 	}
 
 	// Send until all channels except removeSub have been chosen. 'cases' tracks a prefix
 	// of sendCases. When a send succeeds, the corresponding case moves to the end of
 	// 'cases' and it shrinks by one element.
-	cases := t.subscriber
+	cases := t.sendCases
 	for {
 		// Fast path: try sending without blocking before adding to the select set.
 		// This should usually succeed if subscribers are fast enough and have free
 		// buffer space.
-		for i := 0; i < len(cases); i++ {
+		for i := firstSubSendCase; i < len(cases); i++ {
 			if cases[i].Chan.TrySend(rvalue) {
 				sent++
 				cases = cases.deactivate(i)
 				i--
 			}
 		}
-		if len(cases) == 0 {
+		if len(cases) == firstSubSendCase {
 			break
 		}
 		// Select on all the receivers, waiting for them to unblock.
 		chosen, recv, _ := reflect.Select(cases)
 		if chosen == 0 /* <-f.removeSub */ {
-			index := t.subscriber.find(recv.Interface())
-			t.subscriber = t.subscriber.delete(index)
+			index := t.sendCases.find(recv.Interface())
+			t.sendCases = t.sendCases.delete(index)
 			if index >= 0 && index < len(cases) {
 				// Shrink 'cases' too because the removed case was still active.
-				cases = t.subscriber[:len(cases)-1]
+				cases = t.sendCases[:len(cases)-1]
 			}
 		} else {
 			cases = cases.deactivate(chosen)
@@ -116,19 +142,38 @@ func (t *Topic) Publish(value interface{}) (sent int) {
 	}
 
 	// Forget about the sent value and hand off the send lock.
-	for i := 0; i < len(cases); i++ {
-		t.subscriber[i].Send = reflect.Value{}
+	for i := firstSubSendCase; i < len(t.sendCases); i++ {
+		t.sendCases[i].Send = reflect.Value{}
 	}
-	t.sendBlocker <- struct{}{}
+	t.sendLock <- struct{}{}
 	return sent
 }
 
 func (t *Topic) checkType(value reflect.Type) bool {
-	if t.eType == nil {
-		t.eType = value
+	if t.etype == nil {
+		t.etype = value
 		return true
 	}
-	return t.eType == value
+	return t.etype == value
+}
+
+// subPerformer
+type subPerformer struct {
+	topic   *Topic
+	channel reflect.Value
+	errOnce sync.Once
+	err     chan error
+}
+
+func (s *subPerformer) Unsubscribe() {
+	s.errOnce.Do(func() {
+		s.topic.Unsubscribe(s)
+		close(s.err)
+	})
+}
+
+func (s *subPerformer) Err() <-chan error {
+	return s.err
 }
 
 type caseList []reflect.SelectCase

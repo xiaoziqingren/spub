@@ -1,7 +1,6 @@
 package topic
 
 import (
-	"reflect"
 	"sync"
 
 	"github.com/xiaoziqingren/spub/subscription"
@@ -46,9 +45,7 @@ func (t *topics) Subscribe(name string, channel interface{}) (subscription.Subsc
 	defer t.mu.Unlock()
 
 	if val, ok := t.topicList[name]; ok {
-		val.Subscribe(channel)
-		sub := &subPerformer{topic: val, channel: reflect.ValueOf(channel), err: make(chan error, 1)}
-		return sub, nil
+		return val.Subscribe(channel), nil
 	}
 	return nil, errHaveNoTopic
 }
@@ -62,23 +59,4 @@ func (t *topics) Publish(name string, value interface{}) error {
 		return nil
 	}
 	return errHaveNoTopic
-}
-
-// subPerformer
-type subPerformer struct {
-	topic   *Topic
-	channel reflect.Value
-	errOnce sync.Once
-	err     chan error
-}
-
-func (s *subPerformer) Unsubscribe() {
-	s.errOnce.Do(func() {
-		s.topic.UnSubscribe(s.channel)
-		close(s.err)
-	})
-}
-
-func (s *subPerformer) Err() <-chan error {
-	return s.err
 }
