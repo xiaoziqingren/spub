@@ -41,7 +41,7 @@ func (t *topics) exist(name string) bool {
 	return ok
 }
 
-func (t *topics) Subscribe(name string, channel chan interface{}) (subscription.Subscription, error) {
+func (t *topics) Subscribe(name string, channel chan struct{}) (subscription.Subscription, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

@@ -11,7 +11,7 @@ func NewTopic(name string) error {
 }
 
 // Subscribe
-func Subscribe(name string, channel chan interface{}) (subscription.Subscription, error) {
+func Subscribe(name string, channel chan struct{}) (subscription.Subscription, error) {
 	return topic.Manager.Subscribe(name, channel)
 }
 
