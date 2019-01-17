@@ -34,7 +34,7 @@ func (t *Topic) init() {
 	t.sendBlocker <- struct{}{}
 }
 
-func (t *Topic) Subscribe(receiver chan struct{}) {
+func (t *Topic) Subscribe(receiver interface{}) {
 	// check chan type
 	chanVal := reflect.ValueOf(receiver)
 	chanTyp := chanVal.Type()
