@@ -1,15 +1,14 @@
 package topic
 
 import (
-	"github.com/xiaoziqingren/spub/subscription"
 	"reflect"
 	"sync"
+
+	"github.com/xiaoziqingren/spub/subscription"
 )
 
 // Topic
 type Topic struct {
-	name string
-
 	once      sync.Once        // ensures that init only runs once
 	sendLock  chan struct{}    // sendLock has a one-element buffer and is empty when held.It protects sendCases.
 	removeSub chan interface{} // interrupts Send
@@ -26,16 +25,6 @@ type Topic struct {
 // sendCases[0] is a SelectRecv case for the removeSub channel.
 const firstSubSendCase = 1
 
-func NewTopic(name string) error {
-	if Manager.exist(name) {
-		return errUnusableTopic
-	}
-
-	t := &Topic{name: name}
-	Manager.add(t)
-	return nil
-}
-
 func (t *Topic) init() {
 	t.removeSub = make(chan interface{})
 	t.sendLock = make(chan struct{}, 1)
@@ -49,7 +38,7 @@ func (t *Topic) Subscribe(channel interface{}) subscription.Subscription {
 	chanval := reflect.ValueOf(channel)
 	chantyp := chanval.Type()
 	if chantyp.Kind() != reflect.Chan || chantyp.ChanDir()&reflect.SendDir == 0 {
-		panic(errBadChannel)
+		panic(ErrBadChannel)
 	}
 	sub := &subPerformer{topic: t, channel: chanval, err: make(chan error, 1)}
 

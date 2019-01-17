@@ -6,9 +6,9 @@ import (
 )
 
 var (
-	errBadChannel    = errors.New(" Subscribe argument does not have sendable channel type ")
-	errUnusableTopic = errors.New(" Unusable topic name ")
-	errHaveNoTopic   = errors.New(" Have no topic with this name ")
+	ErrBadChannel    = errors.New(" Subscribe argument does not have sendable channel type ")
+	ErrUnusableTopic = errors.New(" Unusable topic name ")
+	ErrHaveNoTopic   = errors.New(" Have no topic with this name ")
 )
 
 type ChanTypeError struct {
